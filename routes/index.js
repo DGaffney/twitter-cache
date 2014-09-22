@@ -1,6 +1,8 @@
 var express = require('express');
 var router = express.Router();
 var OAuth = require('oauth');
+var md5 = require('MD5');
+
 function getTwitterClient(req){
   var oauth = new OAuth.OAuth(
       'https://api.twitter.com/oauth/request_token',
@@ -44,41 +46,64 @@ function keys(service, req){
   });
   return usefulKeys
 }
-function result(response, e, data, res){
-  console.log(response)
-  console.log(e)
-  console.log(data)
-  console.log(res)
-  if (e) console.error(e);
-  response.json(data)
-}
-function get(service, req, response){
-  return service.get(
-    'https://api.twitter.com/1.1/'+req.params.endpoint_group+'/'+req.params.endpoint+'.json'+keysStringed(keys(service, req)),
-    req.query.oauth_token,
-    req.query.oauth_token_secret,
-    result(response))
-}
-function post(service, req, response){
-  return service.get(
-    'https://api.twitter.com/1.1/'+req.params.endpoint_group+'/'+req.params.endpoint+'.json',
-    req.query.oauth_token,
-    req.query.oauth_token_secret,
-    keys(service, req),
-    result(response));
-}
-function routeGetRequest(req, response){
-  get(service(req), req, response)
-}
-function routePostRequest(req, response){
-  post(service(req), req, response)
+function store(req, doc, data){
+  doc.content = JSON.parse(data)
+  doc.created_at = new Date()
+  doc.updated_at = doc.created_at
+  req.db.get('cache').insert([doc], {w:1}, function(err, result) {console.log(err);console.log("Wrote to db.")})
 }
 
-router.get('/:service/:endpoint_group/:endpoint.json', function(req, res) {
-  routeGetRequest(req, res)
+function update(req, doc, existing, data){
+  existing.content = JSON.parse(data)
+  existing.updated_at = new Date()
+  req.db.get('cache').update({lookup: doc.lookup}, existing, {w:1}, function(err, result) {console.log(err);console.log("Updated Document")});
+}
+
+router.get('/:service/*:path\.json', function(req, res) {
+  var db = req.db;
+  var collection = db.get('cache');
+  var apiParams = keys(req.params.service, req)
+  var docMeta = {query: apiParams, service: req.params.service, endpoint: req.params.path+req.params['0']}
+  docMeta.lookup = md5(docMeta)
+  console.log(md5(docMeta))
+  collection.find({lookup: docMeta.lookup}, function(e,doc){
+    console.log(doc[0] && doc[0].updated_at <= new Date(new Date()-1000*60*60*24*7))
+    if (doc[0] && doc[0].updated_at > new Date(new Date()-1000*60*60*24*7)){
+      console.log("Responded with Stored.")
+      res.send(doc[0].content)
+    } else if (doc[0] && doc[0].updated_at <= new Date(new Date()-1000*60*60*24*7)){
+      getTwitterClient(req).get(
+        'https://api.twitter.com/1.1/'+req.params.path+req.params['0']+'.json'+keysStringed(apiParams),
+        req.query.oauth_token,
+        req.query.oauth_token_secret,
+        function (e, data, resp){
+          if (e) console.error(e);
+          update(req, docMeta, doc[0], data)
+          res.send(data)
+        }
+      )
+    } else if (doc[0] == null) {
+      console.log(doc)
+      getTwitterClient(req).get(
+        'https://api.twitter.com/1.1/'+req.params.path+req.params['0']+'.json'+keysStringed(apiParams),
+        req.query.oauth_token,
+        req.query.oauth_token_secret,
+        function (e, data, resp){
+          if (e) console.error(e);
+          store(req, docMeta, data)
+          res.send(data)
+        }
+      )
+    }
+  });
 });
-router.post('/:service/:endpoint_group/:endpoint.json', function(req, res) {
-  routePostRequest(req, res)
+router.post('/:service/*:path\.json', function(req, res) {
+return res.json(getTwitterClient(req).get(
+  'https://api.twitter.com/1.1/'+req.params.path+'.json',
+  req.query.oauth_token,
+  req.query.oauth_token_secret,
+  keys(service, req),
+  result(response)));
 });
 
 module.exports = router;
